@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 
 import yaml
 
@@ -264,8 +265,15 @@ class FixtureProvider:
             return ModelDecision("tool", tool="calculate_business_impact", args={"business_dates": dates})
         lin = _obs(turn, "get_lineage_neighbors")
         imp = _obs(turn, "calculate_business_impact")
-        nodes = [n["asset_id"] for n in (lin["output"]["nodes"] if lin else [])]
-        downstream = [n for n in nodes if order.index(n) >= order.index(primary)] if primary in order else nodes
+        edges = [(e["upstream"], e["downstream"]) for e in (lin["output"]["edges"] if lin else [])]
+        reach, frontier = {primary}, [primary]
+        while frontier:
+            cur = frontier.pop()
+            for up, down in edges:
+                if up == cur and down not in reach:
+                    reach.add(down)
+                    frontier.append(down)
+        downstream = sorted(reach)
         return ModelDecision(
             "final",
             final={
@@ -614,7 +622,7 @@ class FixtureProvider:
             if not _done(turn, "get_asset_metadata", asset_id="fct_payments"):
                 return ModelDecision("tool", tool="get_asset_metadata", args={"asset_id": "fct_payments"})
             sql_ = _obs(turn, "get_asset_metadata", asset_id="fct_payments")["output"]["model_sql"] or ""
-            bad = re.search(r"left join \{\{ ref\('stg_refunds'\) \}\} r on r\.order_id = p\.order_id", sql_)
+            bad = re.search(r"left join \{\{ ref\('stg_orders'\) \}\} fo on fo\.customer_id = o\.customer_id", sql_)
             if not bad:
                 return ModelDecision(
                     "final",
@@ -626,21 +634,21 @@ class FixtureProvider:
                 )
             fixed = sql_.replace(
                 bad.group(0),
-                "left join (\n    select distinct on (payment_id) payment_id, status\n"
-                "    from {{ ref('stg_refunds') }}\n    order by payment_id, event_ts desc, refund_event_id desc\n"
-                ") r on r.payment_id = p.payment_id",
+                "left join (\n    select customer_id, min(created_at) as created_at\n"
+                "    from {{ ref('stg_orders') }}\n    group by customer_id\n"
+                ") fo on fo.customer_id = o.customer_id",
             )
             return ModelDecision(
                 "final",
                 final={
                     "kind": "dbt_patch",
-                    "summary": "Keep the new refund-status column but join one latest refund per "
-                    "payment on payment_id, restoring one row per payment_id.",
+                    "summary": "Keep the new first-order column but aggregate orders to one row per "
+                    "customer before joining, restoring one row per payment_id.",
                     "files": {"dbt/models/marts/fct_payments.sql": fixed},
                     "asset_scope": ["fct_payments", "mart_daily_revenue"],
                     "partition_scope": dates,
                     "preconditions": ["base commit unchanged"],
-                    "risks": ["refund status semantics: latest refund only"],
+                    "risks": ["first-order date now computed per customer; verify dashboard semantics"],
                     "rollback_plan": "restore previous fct_payments code commit and pre-change mart partitions",
                     "claimed_confidence": 0.75,
                 },
@@ -785,8 +793,24 @@ class FixtureProvider:
 
     # -- single-agent baseline ----------------------------------------------------------------
     def _single_agent(self, turn: AgentTurn, profile: dict) -> ModelDecision:
-        """One agent with the union of investigator tools and the same budget (evaluation baseline)."""
-        return self._quality_investigator(turn, profile)
+        """One generalist agent (evaluation baseline): the same investigation steps, one shared context
+        window, one step/tool budget, no parallel branches and no separate rounds."""
+        d = self._quality_investigator(turn, profile)
+        if d.kind == "tool":
+            return d
+        quality = d.final
+        dates = quality.get("affected_partitions") or turn.context.get("affected_partitions", [])
+        d = self._lineage_investigator(replace(turn, context={**turn.context, "affected_partitions": dates}), profile)
+        if d.kind == "tool":
+            return d
+        ctx = {**turn.context, "affected_partitions": dates, "prior_findings": {"quality": quality, "lineage": d.final}}
+        for rnd in (1, 2, 3):
+            d = self._root_cause_investigator(replace(turn, context={**ctx, "investigation_round": rnd}), profile)
+            if d.kind == "tool" or d.final.get("recommended_next_step") != "investigate_more":
+                break
+        if d.kind == "final":
+            d.final["summary"] = "single agent: " + d.final.get("summary", "")
+        return d
 
 
 MAPPINGS_HEADER = """# Ingestion mappings: which delivered source schema versions are accepted, and how their

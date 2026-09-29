@@ -3,18 +3,29 @@ SHELL := /bin/bash
 UV ?= uv
 COMPOSE ?= docker compose -f infra/docker-compose.yml --env-file .env
 PROFILE ?= core
+# Run `dw` inside the Compose worker when the stack is up, otherwise on the host with uv.
+IN_DOCKER := $(shell docker compose -f infra/docker-compose.yml --env-file .env ps --status running -q worker 2>/dev/null)
+ifeq ($(strip $(IN_DOCKER)),)
+DW = $(UV) run dw
+else
+DW = $(COMPOSE) exec -T worker dw
+endif
 
-.PHONY: help setup up down seed pipeline checks demo test test-fast e2e eval lint fmt fault-list fault reset api worker web local-db
+.PHONY: help setup setup-env up down seed pipeline checks demo test test-fast e2e eval lint fmt fault-list fault reset api worker web local-db
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-12s %s\n", $$1, $$2}'
 
-setup: ## Create .env with generated secrets, install Python + web dependencies
+setup-env: ## Create/refresh .env with generated secrets (keeps existing values)
 	python3 scripts/gen_env.py
+
+setup: setup-env ## Create .env, install Python + web dependencies
 	$(UV) sync
 	cd apps/web && npm ci
 
 up: ## Start the stack with Docker Compose (PROFILE=core|full|observability)
+	@if [ "$(PROFILE)" = "full" ]; then export DW_AIRFLOW_BASE_URL=http://airflow:8080; fi; \
+	if [ "$(PROFILE)" = "observability" ]; then export DW_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318; fi; \
 	$(COMPOSE) --profile $(PROFILE) up -d --build --wait
 
 down: ## Stop the Docker Compose stack
@@ -25,26 +36,26 @@ local-db: ## Create databases, roles and schemas on the configured PostgreSQL (h
 	$(UV) run alembic upgrade head
 
 seed: ## Regenerate synthetic sources and rebuild the warehouse (synthetic only)
-	$(UV) run dw seed
-	$(UV) run dw app-seed
+	$(DW) seed
+	$(DW) app-seed
 
 pipeline: ## Run the pipeline once and report failing checks to the API
-	$(UV) run dw pipeline --emit
+	$(DW) pipeline --emit
 
 checks: ## Run the protected quality checks
-	$(UV) run dw checks --all
+	$(DW) checks --all
 
 fault-list: ## List demo fault scenarios
-	$(UV) run dw fault list
+	$(DW) fault list
 
 fault: ## Inject a demo fault: make fault SCENARIO=duplicate_payments
-	$(UV) run dw fault inject $(SCENARIO)
+	$(DW) fault inject $(SCENARIO)
 
 reset: ## Reset demo faults (synthetic data only) and rebuild canonical models
-	$(UV) run dw fault reset
+	$(DW) fault reset
 
 demo: ## Scripted demo: duplicate fault -> investigation -> approval -> recovery
-	$(UV) run dw demo
+	$(DW) demo
 
 api: ## Run the API locally (host mode)
 	$(UV) run uvicorn datawarden.api.main:app --host 0.0.0.0 --port 8000
@@ -65,7 +76,7 @@ e2e: ## Playwright journey against a running stack
 	cd apps/web && npx playwright test
 
 eval: ## Benchmark fixed seeds across fault scenarios; writes docs/EVALUATION.md
-	$(UV) run dw eval
+	$(DW) eval
 
 lint: ## Ruff + TypeScript checks
 	$(UV) run ruff check src tests scripts

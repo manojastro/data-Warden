@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DW_PG_ADMIN_USER: postgres
+  DW_PG_ADMIN_PASSWORD: ci-admin-password
+  DW_MODEL_PROVIDER: fixture
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests scripts
+      - run: uv run ruff format --check src tests scripts
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - run: npm ci && npm run lint && npm run build
+        working-directory: apps/web
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: ci-admin-password }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: Generate local secrets (.env)
+        run: python3 scripts/gen_env.py
+      - run: uv run dw setup-db && uv run alembic upgrade head
+      - name: Unit + integration + scenario tests (fixture model mode)
+        run: uv run pytest -q
+      - name: Evaluation benchmark (one seed)
+        run: uv run dw eval --seeds 42
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: evaluation, path: "docs/EVALUATION.md\nevals/results/" }
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: ci-admin-password }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - run: uv sync --frozen && python3 scripts/gen_env.py
+      - run: uv run dw setup-db && uv run alembic upgrade head && uv run dw seed && uv run dw app-seed
+      - run: npm ci && npm run build && npx playwright install --with-deps chromium
+        working-directory: apps/web
+      - name: Start API and worker
+        run: |
+          nohup uv run uvicorn datawarden.api.main:app --port 8000 > api.log 2>&1 &
+          nohup uv run dw worker > worker.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS localhost:8000/readyz && break; sleep 2; done
+      - run: npx playwright test
+        working-directory: apps/web
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: playwright, path: "apps/web/playwright-report\napi.log\nworker.log" }

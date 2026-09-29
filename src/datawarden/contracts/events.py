@@ -8,6 +8,16 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class CheckOutcome(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    check_id: str = Field(max_length=128, pattern=r"^[a-z0-9_.\-]+$")
+    check_type: str = Field(max_length=32)
+    status: Literal["pass", "fail", "warn", "error"]
+    severity: Literal["critical", "high", "warning"]
+    message: str = Field(default="", max_length=400)
+    partition_date: date | None = None
+
+
 class RunSummary(BaseModel):
     model_config = ConfigDict(extra="ignore")
     run_id: str = Field(max_length=64)
@@ -18,6 +28,7 @@ class RunSummary(BaseModel):
     tasks: dict[str, str] = Field(default_factory=dict)
     error: str | None = Field(default=None, max_length=2000)
     checks: dict[str, int] = Field(default_factory=dict)
+    results: list[CheckOutcome] = Field(default_factory=list, max_length=200)
 
 
 class IncidentEventIn(BaseModel):

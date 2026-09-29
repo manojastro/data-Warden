@@ -359,6 +359,11 @@ def verify_canonical(op_id: str, scope: list[date], fingerprints: dict[str, str]
         problems.append(f"canonical checks failing after repair: {failing}")
     with connect("pipeline", autocommit=True) as pconn:
         store_results(pconn, results, None)
+    from datawarden.services.incidents import record_results
+
+    with new_session() as adb:  # keep the application's "latest result per check" view current
+        record_results(adb, [r.to_dict() for r in results], None)
+        adb.commit()
     return not problems, {
         "problems": problems,
         "checks_failing": failing,

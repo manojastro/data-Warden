@@ -82,7 +82,7 @@ AGENTS = {
         "a single generalist investigator (evaluation baseline)",
         "Investigate the incident end to end with the investigator tools.",
         AgentFinding,
-        12,
+        25,
     ),
 }
 

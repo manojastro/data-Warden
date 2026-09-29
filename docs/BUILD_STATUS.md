@@ -1,39 +1,73 @@
 # Build status
 
-Legend: **done+tested** (automated test exercises it), **done** (implemented, manually verified),
-**fixture** (runs with deterministic model fixtures), **disabled** (needs configuration),
-**blocked** (external dependency missing), **todo**.
+Legend: **done+tested** — covered by an automated test that ran and passed; **done+verified** —
+implemented and exercised manually (evidence noted); **fixture** — exercised with deterministic
+model fixtures only; **implemented, not verified** — code exists but was not run against the real
+external system; **disabled** — needs configuration; **todo**.
 
-## Milestone 1 – Data foundation: done+tested
+Environment used: Linux container, 4 vCPU / 15 GB RAM, PostgreSQL 16 (host) and Docker Compose
+(PostgreSQL 16-alpine, Airflow 3.1.0), Python 3.11, Node 22. Model mode: **fixture** throughout.
 
-| Item | Status | Evidence |
+## Milestones
+
+| Milestone | Status |
+| --- | --- |
+| 1 Data foundation | done+tested |
+| 2 Incident platform | done+tested |
+| 3 Multi-agent investigation | done+tested (fixture) |
+| 4 Verified recovery | done+tested |
+| 5 Integrations and UX | see table below |
+| 6 Evaluation and handoff | see table below |
+
+## Feature status
+
+| Feature | Status | Evidence |
 | --- | --- | --- |
-| Deterministic generator (30 days, 57,414 events, seed 42) | done+tested | `tests/test_generator.py` |
-| Immutable, checksummed source store | done+tested | `src/datawarden/sources.py` |
-| Warehouse roles/schemas (pipeline, transformer, executor, agent_ro, shadow, validator) | done+tested | `src/datawarden/warehouse/bootstrap.py`; append-only test |
-| Contract-checked, idempotent ingestion | done+tested | `test_ingestion_is_idempotent_and_raw_is_append_only`, `test_schema_drift_rejects_whole_batch` |
-| dbt staging/facts/mart (incremental, bounded replay) | done+tested | `pipelines/dbt/`; `test_late_events_need_bounded_replay` |
-| Independent reconciliation oracle | done+tested | `src/datawarden/oracle/`; `test_healthy_pipeline_reconciles_to_source_truth` |
-| 21 protected checks + dbt tests + pipeline task results | done+tested | `src/datawarden/checks/registry.py` |
-| Fault injector (9 scenarios incl. 2 schema-drift variants) + scoped reset | done (all 9 manually verified, 3 automated) | `dw fault inject <scenario>` |
+| Generator (seeded, 30 days, 57.5k events, split-tender payments) | done+tested | `tests/test_generator.py` |
+| Warehouse roles & schemas, append-only raw | done+tested | `test_ingestion_is_idempotent_and_raw_is_append_only`, `test_readonly_sql_cannot_reach_protected_data` |
+| Contract-checked idempotent ingestion | done+tested | M1 tests, schema-drift scenarios |
+| dbt models, incremental mart, `replay_dates` | done+tested | late-events scenario (only day 20 changes) |
+| Independent oracle + 21 checks | done+tested | `test_healthy_pipeline_reconciles_to_source_truth` |
+| Fault injector (9 scenarios) + scoped reset | done+tested | every scenario test injects and resets |
+| App DB (Alembic), append-only audit trigger | done+tested | migrations applied in tests and Compose |
+| Auth (argon2, sessions, CSRF), roles, permission matrix | done+tested | `tests/test_api.py`, viewer/operator scenario test |
+| Signed + idempotent event ingestion | done+tested | `tests/test_api.py` |
+| Job queue (SKIP LOCKED, leases, heartbeat, backoff), outbox, worker | done+tested | all scenario tests run through it; worker-restart test uses a new process |
+| SSE with persisted ids / timeline resume | done+tested (resume via `after_id`); browser EventSource verified manually | `test_timeline_resume_after_event_id`, screenshots |
+| Typed tools, allowlists, budgets, timeouts, bounded output, evidence | done+tested | isolation, budget, injection tests |
+| LangGraph graph (fan-out/join, loops, budgets, checkpoints, interrupt) | done+tested (fixture) | all scenario tests |
+| Single-agent baseline graph variant | done+verified (fixture) | eval runner |
+| Model adapters: fixture | done+tested | |
+| Model adapters: OpenAI-compatible / Azure OpenAI | implemented, not verified (no endpoint/key) | `agents/models.py` |
+| Proposal policy | done+tested | faulty-proposal scenario |
+| Shadow schemas + protected validation (11 checks) | done+tested | every repair scenario |
+| Approval (hash-bound, expiry, optimistic concurrency, invalidation → revision) | done+tested | stale/modified test, duplicate-approval test |
+| Executor saga, partition locks, snapshots, verification | done+tested | repair scenarios, conflict test |
+| Verified rollback; failed rollback → manual_intervention | rollback done+tested (chaos hook); manual-intervention path implemented, not triggered by a test | rollback test |
+| Dashboard (8 page groups) | done+verified (Playwright screenshots) | see e2e row |
+| Playwright journey | see "Tests run" | `apps/web/e2e/journey.spec.ts` |
+| Docker Compose core profile | done+verified | `docker compose … --profile full up --wait` all healthy |
+| Airflow full profile (DAG, failure callback, adapter) | see "Airflow" below | |
+| GitHub adapter | implemented, not verified (no token) | `integrations/github.py` |
+| Read-only MCP server | done+tested (in-process calls) | `test_mcp_server_is_read_only_and_audited` |
+| Webhooks | disabled by default; SSRF guard implemented, not verified live | `services/notify.py` |
+| Langfuse | disabled (not integrated beyond status reporting) | |
+| OpenTelemetry | spans created in-process; OTLP export only when configured; collector profile provided, not verified | `observability.py` |
+| Evaluation benchmark + report | see `docs/EVALUATION.md` | `evals/runner.py` |
+| OIDC / Entra ID | todo (extension seam only) | |
 
-Acceptance evidence (2026-09-29, host PostgreSQL 16, seed 42):
-- Healthy: `dw checks --all` → 21/21 pass, 30 mart partitions reconcile.
-- `duplicate_payments`: reconciliation fails on exactly the 3 ground-truth dates; uniqueness fails (81 duplicate rows).
-- Each other scenario produces its expected symptom (see `docs/FAULT_CATALOG.md` once written).
-- `uv run pytest` → 9 passed (≈3 min, dominated by dbt full-refresh rebuilds).
+## Tests run
+
+(Updated at the end of the build; see the final section.)
 
 ## Commands verified
-```
-python3 scripts/gen_env.py      # .env with generated secrets
-uv run dw setup-db              # roles, databases, schemas (admin credential)
-uv run dw seed                  # generate sources, full pipeline build
-uv run dw checks --all
-uv run dw fault inject duplicate_payments && uv run dw pipeline
-uv run dw fault reset
-uv run pytest
-```
 
-## Next
-Milestone 2: application DB migrations, FastAPI, auth/roles, job queue + worker, signed event
-ingestion, read-only tools, basic UI.
+```
+python3 scripts/gen_env.py
+uv run dw setup-db && uv run alembic upgrade head
+uv run dw seed && uv run dw app-seed
+uv run dw fault inject duplicate_payments && uv run dw pipeline --emit && uv run dw worker --drain --wait 6
+uv run pytest
+DW_BUILD_EXTRA_CA=… docker compose -f infra/docker-compose.yml --env-file .env --profile full build
+docker compose -f infra/docker-compose.yml --env-file .env --profile full up -d --wait
+```

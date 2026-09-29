@@ -147,6 +147,11 @@ def run_protected_validation(ctx: ToolContext, args: ValidateArgs) -> dict:
                 )
             )
         failed = [r.check_id for r in results if r.status != "pass"]
+        if args.build_ok and not args.checks:
+            try:
+                prop.comparison = validation.shadow_vs_canonical(prop.shadow_schema, prop.partition_scope)
+            except Exception as exc:  # noqa: BLE001 - review aid only; never blocks validation
+                prop.comparison = {"error": type(exc).__name__}
         prop.status = "validation_failed" if failed else "validated"
         db.commit()
     return {

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import httpx
 
 from datawarden.config import get_settings
-from datawarden.contracts.events import IncidentEventIn, RunSummary
+from datawarden.contracts.events import CheckOutcome, IncidentEventIn, RunSummary
 from datawarden.events import signing
 
 
@@ -23,7 +23,19 @@ def build_events(report) -> list[tuple[str, IncidentEventIn]]:
         tasks=s["tasks"],
         error=s["error"],
         checks=s["checks"],
+        results=[
+            CheckOutcome(
+                check_id=c.check_id,
+                check_type=c.check_type,
+                status=c.status,
+                severity=c.severity,
+                message=c.message[:400],
+                partition_date=c.partition_date,
+            )
+            for c in report.checks
+        ],
     )
+    light = run.model_copy(update={"results": []})  # check events reference the run without repeating results
     now = datetime.now(UTC)
     events = [
         (
@@ -39,7 +51,7 @@ def build_events(report) -> list[tuple[str, IncidentEventIn]]:
                     source="pipeline",
                     event_type="check_result",
                     occurred_at=now,
-                    run=run,
+                    run=light,
                     check_id=c.check_id,
                     check_type=c.check_type,
                     asset=c.asset,

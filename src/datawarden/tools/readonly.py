@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from datetime import date
+from decimal import Decimal
 from typing import Literal
 
 import yaml
@@ -375,7 +376,7 @@ def run_readonly_sql(ctx: ToolContext, args: SqlArgs) -> dict:
         rows = cur.fetchall()
         cols = [d.name for d in cur.description]
         conn.rollback()
-    rows_out = [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(r).items()} for r in rows[:100]]
+    rows_out = [{k: _jsonable(v) for k, v in dict(r).items()} for r in rows[:100]]
     return {
         "summary": f"{min(len(rows), 100)} row(s){' (truncated at 100)' if len(rows) > 100 else ''}; "
         f"columns {cols[:12]}",
@@ -384,6 +385,12 @@ def run_readonly_sql(ctx: ToolContext, args: SqlArgs) -> dict:
         "truncated": len(rows) > 100,
         "sql": args.sql,
     }
+
+
+def _jsonable(v):
+    if isinstance(v, Decimal):
+        return int(v) if v == v.to_integral_value() else float(v)
+    return v.isoformat() if hasattr(v, "isoformat") else v
 
 
 # --- redacted samples -----------------------------------------------------------------------
@@ -460,7 +467,7 @@ def sample_redacted_rows(ctx: ToolContext, args: SampleArgs) -> dict:
                 else:
                     row[k] = None
             else:
-                row[k] = v.isoformat() if hasattr(v, "isoformat") else v
+                row[k] = _jsonable(v)
         out.append(row)
     return {
         "summary": f"{len(out)} redacted row(s) from {args.asset_id}"

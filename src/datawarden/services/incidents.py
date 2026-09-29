@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -61,22 +61,34 @@ def ingest_event(
             )
         )
 
+    if event.event_type == "pipeline_run" and event.run and event.run.results:
+        record_results(db, event.run.results, event.run.run_id)
     incident: Incident | None = None
     if event.event_type in ("check_result", "pipeline_task_failed") and event.check_id:
         if db.get(QualityCheck, event.check_id) is None:
             ensure_check(db, event.check_id, event.check_type or "operational", event.severity, event.message[:200])
         db.flush()
-        db.add(
-            QualityResult(
-                check_id=event.check_id,
-                run_id=event.run.run_id if event.run else None,
-                status=event.status or "fail",
-                severity=event.severity,
-                partition_date=event.partition_date,
-                observed=event.observed,
-                message=event.message,
+        recorded = (
+            event.run is not None
+            and db.scalar(
+                select(QualityResult.id)
+                .where(QualityResult.check_id == event.check_id, QualityResult.run_id == event.run.run_id)
+                .limit(1)
             )
+            is not None
         )
+        if not recorded:  # the run summary normally records it first; callbacks without one record here
+            db.add(
+                QualityResult(
+                    check_id=event.check_id,
+                    run_id=event.run.run_id if event.run else None,
+                    status=event.status or "fail",
+                    severity=event.severity,
+                    partition_date=event.partition_date,
+                    observed=event.observed,
+                    message=event.message,
+                )
+            )
         if event.status in ("fail", "warn", "error") or event.event_type == "pipeline_task_failed":
             incident = _correlate(db, event, actor=actor, request_id=request_id, auto_start=auto_start)
 
@@ -94,6 +106,29 @@ def ingest_event(
     db.add(row)
     db.flush()
     return {"event_id": row.id, "incident_id": incident.id if incident else None, "duplicate": False}
+
+
+def record_results(db: Session, results, run_id: str | None) -> None:
+    """Record every check outcome of a run (passing ones too) so 'latest result' views stay accurate."""
+    for r in results:
+        get = r.get if isinstance(r, dict) else lambda k, _r=r: getattr(_r, k)
+        if db.get(QualityCheck, get("check_id")) is None:
+            ensure_check(db, get("check_id"), get("check_type"), get("severity"), get("message")[:200])
+        db.flush()
+        pdate = get("partition_date")
+        if isinstance(pdate, str):
+            pdate = date.fromisoformat(pdate)
+        db.add(
+            QualityResult(
+                check_id=get("check_id"),
+                run_id=run_id,
+                status=get("status"),
+                severity=get("severity"),
+                partition_date=pdate,
+                observed={},
+                message=get("message")[:400],
+            )
+        )
 
 
 def _correlate(

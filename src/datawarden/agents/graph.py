@@ -38,6 +38,12 @@ from datawarden.services.audit import audit, publish
 from datawarden.tools import base as tools
 
 GRAPH_VERSION = "incident-graph/1.0"
+
+
+def graph_version(variant: str) -> str:
+    return GRAPH_VERSION if variant == "multi" else f"{GRAPH_VERSION}+{variant}"
+
+
 NODES = [
     "intake",
     "load_context",
@@ -75,6 +81,7 @@ EDGES = [
     ("verification", "repair_planner"),
     ("verification", "escalate"),
     ("request_approval", "execute"),
+    ("request_approval", "repair_planner"),
     ("request_approval", "escalate"),
     ("execute", "resolve"),
     ("execute", "repair_planner"),
@@ -200,7 +207,7 @@ def intake(state: IncidentState) -> dict:
         # lease: only one investigation per incident; a retry of the same thread may continue
         res = db.execute(
             text("""UPDATE incidents SET status = 'investigating', graph_thread_id = :t,
-                                 graph_version = :v, model_mode = :m, version = version + 1
+                                 graph_version = coalesce(graph_version, :v), model_mode = :m, version = version + 1
                                  WHERE id = :id AND (status = 'open' OR (status = 'investigating' AND graph_thread_id = :t))
                                  RETURNING id"""),
             {
@@ -326,7 +333,8 @@ def root_cause(state: IncidentState) -> dict:
     ctx = {**_base_ctx(state), "prior_findings": prior, "investigation_round": rnd}
     quality = next((f for f in state.get("agent_findings", []) if f["agent"] == "quality_investigator"), None)
     if quality and quality.get("affected_partitions"):
-        ctx["affected_partitions"] = sorted(set(ctx["affected_partitions"]) | set(quality["affected_partitions"]))
+        # partitions with measured business impact (e.g. reconciliation mismatches) scope the diagnosis
+        ctx["affected_partitions"] = sorted(quality["affected_partitions"])
     finding, info = run_agent(
         "root_cause_investigator", state["incident_id"], ctx, round_=rnd, deadline=_deadline(state)
     )
@@ -350,6 +358,7 @@ def root_cause(state: IncidentState) -> dict:
             "summary": f.summary,
             "evidence_ids": f.evidence_ids,
             "uncertainty": f.uncertainty,
+            "affected_partitions": sorted(f.affected_partitions or ctx["affected_partitions"]),
         }
     if route == "escalate":
         out["terminal_reason"] = _escalation_reason(state, f, rnd, bool(new_evidence))
@@ -389,6 +398,36 @@ def _escalation_reason(state, f: AgentFinding, rnd: int, new_evidence: bool) -> 
     return f"escalated by investigation: {f.summary}"
 
 
+@node("single_investigation")
+def single_investigation(state: IncidentState) -> dict:
+    """Evaluation baseline: one generalist agent replaces the three investigators."""
+    s = get_settings()
+    finding, info = run_agent("single_agent", state["incident_id"], _base_ctx(state), deadline=_deadline(state))
+    f: AgentFinding = finding
+    rnd = s.budget_investigation_rounds  # the single agent runs its own rounds inside one loop
+    route = _route_root_cause(state, f, rnd, True)
+    out = {
+        "investigation_round": 1,
+        "agent_findings": [{"agent": "single_agent", "round": 1, **f.model_dump(mode="json")}],
+        "evidence_refs": f.evidence_ids,
+        "hypotheses": [h.model_dump() for h in f.hypotheses],
+        "token_usage": _usage(info),
+        "route": route,
+        "affected_partitions": sorted(set(state.get("affected_partitions", [])) | set(f.affected_partitions)),
+    }
+    if f.conclusive:
+        out["root_cause"] = {
+            "category": f.root_cause,
+            "summary": f.summary,
+            "evidence_ids": f.evidence_ids,
+            "uncertainty": f.uncertainty,
+            "affected_partitions": sorted(f.affected_partitions or state.get("affected_partitions", [])),
+        }
+    if route == "escalate":
+        out["terminal_reason"] = _escalation_reason(state, f, rnd, True)
+    return out
+
+
 @node("repair_planner")
 def repair_planner(state: IncidentState) -> dict:
     s = get_settings()
@@ -401,6 +440,8 @@ def repair_planner(state: IncidentState) -> dict:
         "root_cause_summary": (state.get("root_cause") or {}).get("summary"),
         "repair_attempt": attempt,
     }
+    if (state.get("root_cause") or {}).get("affected_partitions"):
+        ctx["affected_partitions"] = state["root_cause"]["affected_partitions"]
     draft, info = run_agent(
         "repair_planner",
         state["incident_id"],
@@ -622,6 +663,17 @@ def request_approval(state: IncidentState) -> dict:
         status = appr.status
     if status == "approved":
         return {"route": "execute", "approval_id": approval_id, "approval_status": status}
+    if status == "invalidated" and state.get("repair_attempt", 0) < get_settings().budget_repair_attempts:
+        # a changed patch/scope or stale snapshot: draft an explicit revision with a new approval request
+        with new_session() as db:
+            why = db.get(Approval, approval_id).invalidation_reason
+        _set_status(iid, "investigating")
+        return {
+            "route": "repair_planner",
+            "approval_id": approval_id,
+            "approval_status": status,
+            "feedback": [*state.get("feedback", []), {"stage": "approval", "problems": [why]}],
+        }
     reason = {
         "rejected": "proposal rejected by approver; rejection terminates this proposal",
         "expired": "approval expired",
@@ -732,14 +784,22 @@ def _router(*allowed: str):
     return route
 
 
-def build_graph(checkpointer=None):
+def build_graph(checkpointer=None, variant: str = "multi"):
+    """``variant='multi'`` is the product graph; ``'single'`` is the single-agent evaluation baseline."""
     g = StateGraph(IncidentState)
+    investigation = (
+        [
+            ("quality_investigator", quality_investigator),
+            ("lineage_investigator", lineage_investigator),
+            ("root_cause", root_cause),
+        ]
+        if variant == "multi"
+        else [("single_investigation", single_investigation)]
+    )
     for name, fn in [
         ("intake", intake),
         ("load_context", load_context),
-        ("quality_investigator", quality_investigator),
-        ("lineage_investigator", lineage_investigator),
-        ("root_cause", root_cause),
+        *investigation,
         ("repair_planner", repair_planner),
         ("policy_check", policy_check),
         ("shadow_validate", shadow_validate),
@@ -756,14 +816,22 @@ def build_graph(checkpointer=None):
     g.add_conditional_edges(
         "intake", lambda s: END if s.get("route") != "ok" else "load_context", ["load_context", END]
     )
-    g.add_edge("load_context", "quality_investigator")
-    g.add_edge("load_context", "lineage_investigator")
-    g.add_edge(["quality_investigator", "lineage_investigator"], "root_cause")
-    g.add_conditional_edges(
-        "root_cause",
-        _router("root_cause", "repair_planner", "close_no_action", "escalate"),
-        ["root_cause", "repair_planner", "close_no_action", "escalate", END],
-    )
+    if variant == "multi":
+        g.add_edge("load_context", "quality_investigator")
+        g.add_edge("load_context", "lineage_investigator")
+        g.add_edge(["quality_investigator", "lineage_investigator"], "root_cause")
+        g.add_conditional_edges(
+            "root_cause",
+            _router("root_cause", "repair_planner", "close_no_action", "escalate"),
+            ["root_cause", "repair_planner", "close_no_action", "escalate", END],
+        )
+    else:
+        g.add_edge("load_context", "single_investigation")
+        g.add_conditional_edges(
+            "single_investigation",
+            _router("repair_planner", "close_no_action", "escalate"),
+            ["repair_planner", "close_no_action", "escalate", END],
+        )
     g.add_conditional_edges("repair_planner", _router("policy_check", "escalate"), ["policy_check", "escalate", END])
     g.add_conditional_edges(
         "policy_check",
@@ -776,7 +844,11 @@ def build_graph(checkpointer=None):
         _router("request_approval", "repair_planner", "escalate"),
         ["request_approval", "repair_planner", "escalate", END],
     )
-    g.add_conditional_edges("request_approval", _router("execute", "escalate"), ["execute", "escalate", END])
+    g.add_conditional_edges(
+        "request_approval",
+        _router("execute", "repair_planner", "escalate"),
+        ["execute", "repair_planner", "escalate", END],
+    )
     g.add_conditional_edges(
         "execute",
         _router("resolve", "repair_planner", "escalate", "manual_intervention"),

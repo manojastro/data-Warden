@@ -23,7 +23,7 @@ SCENARIOS = {
     "schema_drift": "Payments feed v2 renames amount_paise to total_amount_paise (contract published)",
     "schema_drift_unregistered": "Payments feed v2 renames amount_paise without a published contract",
     "late_events": "Events for an older business date arrive after the mart lookback window",
-    "join_fanout": "A code change joins refunds into fct_payments on order_id",
+    "join_fanout": "A code change joins orders into fct_payments on customer_id",
     "transient_failure": "Next pipeline run loses its warehouse connection while building the mart",
     "legit_decline": "A genuine sales decline on the newest business day",
     "faulty_proposal": "Duplicate payments + a faulty repair planner model",
@@ -312,17 +312,17 @@ select
     p.event_ts as paid_at,
     p.payment_business_date,
     o.order_business_date,
-    r.status as latest_refund_status
+    fo.created_at as customer_first_order_at
 from {{ ref('stg_payments') }} p
 left join {{ ref('stg_orders') }} o on o.order_id = p.order_id
-left join {{ ref('stg_refunds') }} r on r.order_id = p.order_id
+left join {{ ref('stg_orders') }} fo on fo.customer_id = o.customer_id
 """
 
 
 def _inject_join_fanout(record: dict) -> None:
     commit = workspace.commit_files(
         {"dbt/models/marts/fct_payments.sql": FANOUT_SQL},
-        "feat(fct_payments): expose refund status for finance dashboard",
+        "feat(fct_payments): add customer first-order date for cohort dashboard",
     )
     record["commits"].append(commit)
     last = _last_day()

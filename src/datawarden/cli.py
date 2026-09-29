@@ -55,13 +55,83 @@ def cmd_pipeline(args) -> int:
     from datawarden.pipeline.runner import run_pipeline
 
     window = (date.fromisoformat(args.replay_start), date.fromisoformat(args.replay_end)) if args.replay_start else None
-    report = run_pipeline(trigger=args.trigger, full_refresh=args.full_refresh, replay_window=window)
-    _print(report.summary())
+    dates = [date.fromisoformat(d) for d in args.replay_dates.split(",") if d.strip()] if args.replay_dates else None
+    report = run_pipeline(
+        trigger=args.trigger, full_refresh=args.full_refresh, replay_window=window, replay_dates=dates
+    )
+    summary = report.summary()
+    if args.airflow_run_id:
+        _remember_airflow_run(args.airflow_run_id, report)
+    _print(summary)
     if args.emit:
         from datawarden.events.emitter import emit_run_events
 
         _print(emit_run_events(report))
     return 0 if report.status == "success" else 1
+
+
+def _airflow_run_file(airflow_run_id: str):
+    import re
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", airflow_run_id)[:150]
+    return get_settings().artifact_dir / "airflow_runs" / f"{safe}.json"
+
+
+def _remember_airflow_run(airflow_run_id: str, report) -> None:
+    from datawarden.events.emitter import build_events
+
+    run = build_events(report)[0][1].run
+    path = _airflow_run_file(airflow_run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(run.model_copy(update={"results": []}).model_dump_json())
+
+
+def cmd_airflow_callback(args) -> int:
+    """Report an Airflow task failure through the signed ingestion endpoint (same path as checks)."""
+    from datetime import UTC, datetime
+
+    import httpx
+
+    from datawarden.contracts.events import IncidentEventIn, RunSummary
+    from datawarden.events.emitter import post_event
+
+    path = _airflow_run_file(args.run_id)
+    run = RunSummary.model_validate_json(path.read_text()) if path.exists() else None
+    event = IncidentEventIn(
+        source="airflow",
+        event_type="pipeline_task_failed",
+        occurred_at=datetime.now(UTC),
+        run=run,
+        check_id=f"airflow.{args.dag_id}.{args.task_id}".lower(),
+        check_type="pipeline_failure",
+        asset=None,
+        status="fail",
+        severity="high",
+        message=f"Airflow task {args.dag_id}.{args.task_id} failed (try {args.try_number}, dag run {args.run_id})",
+        observed={
+            "dag_id": args.dag_id,
+            "task_id": args.task_id,
+            "airflow_run_id": args.run_id,
+            "try_number": args.try_number,
+            "datawarden_run_id": run.run_id if run else None,
+        },
+    )
+    key = f"airflow:{args.dag_id}:{args.run_id}:{args.task_id}:{args.try_number}"[:200]
+    with httpx.Client(timeout=20) as client:
+        _print(post_event(client, key, event))
+    return 0
+
+
+def cmd_airflow(args) -> int:
+    from datawarden.integrations import airflow
+
+    if args.action == "runs":
+        _print(airflow.list_runs())
+    elif args.action == "trigger":
+        _print(airflow.trigger([d for d in (args.replay_dates or "").split(",") if d], note="triggered via dw cli"))
+    elif args.action == "log":
+        print(airflow.task_log(args.run_id))
+    return 0
 
 
 def cmd_checks(args) -> int:
@@ -119,6 +189,46 @@ def cmd_worker(args) -> int:
     return 0
 
 
+def cmd_eval(args) -> int:
+    from datawarden.evals.runner import run_evaluation
+
+    seeds = [int(x) for x in args.seeds.split(",")] if args.seeds else None
+    scenarios = args.scenarios.split(",") if args.scenarios else None
+    modes = args.modes.split(",") if args.modes else None
+    _print(run_evaluation(scenarios=scenarios, seeds=seeds, modes=modes))
+    return 0
+
+
+def cmd_demo(args) -> int:
+    """Scripted demo: wrong-fix rejection, then a successful verified recovery."""
+    from datawarden.evals.scenario import run_scenario
+
+    for scenario in (["faulty_proposal"] if not args.skip_bad else []) + [args.scenario]:
+        print(f"\n=== {scenario} ===")
+        out = run_scenario(scenario, approve=not args.no_approve)
+        for p in out.proposals:
+            print(
+                f"  proposal {p['id']} ({p['kind']}): {p['status']}"
+                + (f"; policy: {p['policy_violations']}" if p["policy_violations"] else "")
+                + (f"; failed checks: {p['failed_validations']}" if p["failed_validations"] else "")
+            )
+        print(
+            f"  incident {out.incident_ids[0] if out.incident_ids else '-'}: {out.status} "
+            f"(root cause {out.root_cause}); recovery {out.recovery}; failing checks after: "
+            f"{out.failing_checks_after or 'none'}"
+        )
+        print(f"  reason: {out.terminal_reason}")
+    print("\nOpen the dashboard (http://localhost:8000 or :5173) to review evidence, diffs, and the recovery journal.")
+    return 0
+
+
+def cmd_mcp(args) -> int:
+    from datawarden.mcp_server import main as mcp_main
+
+    mcp_main()
+    return 0
+
+
 def cmd_oracle(args) -> int:
     from datawarden.oracle.reconciliation import source_truth
 
@@ -144,8 +254,20 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--full-refresh", action="store_true")
     sp.add_argument("--replay-start")
     sp.add_argument("--replay-end")
+    sp.add_argument("--replay-dates", help="comma-separated business dates to recompute exactly")
     sp.add_argument("--emit", action="store_true", help="send failing checks to the API ingestion endpoint")
+    sp.add_argument("--airflow-run-id", help="(Airflow) remember this run for the failure callback")
     sp.set_defaults(fn=cmd_pipeline)
+    sp = sub.add_parser("airflow-callback", help="(Airflow) report a task failure to DataWarden")
+    for a in ("--dag-id", "--task-id", "--run-id"):
+        sp.add_argument(a, required=True)
+    sp.add_argument("--try-number", type=int, default=1)
+    sp.set_defaults(fn=cmd_airflow_callback)
+    sp = sub.add_parser("airflow", help="Airflow adapter: list runs, fetch a log, trigger a scoped replay")
+    sp.add_argument("action", choices=["runs", "log", "trigger"])
+    sp.add_argument("--run-id")
+    sp.add_argument("--replay-dates")
+    sp.set_defaults(fn=cmd_airflow)
     sp = sub.add_parser("checks", help="run protected quality checks")
     sp.add_argument("--all", action="store_true")
     sp.set_defaults(fn=cmd_checks)
@@ -160,6 +282,18 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--drain", action="store_true", help="process ready jobs then exit")
     sp.add_argument("--wait", type=float, default=0, help="with --drain: keep polling this many seconds")
     sp.set_defaults(fn=cmd_worker)
+    sp = sub.add_parser("eval", help="benchmark fixed seeds x scenarios x modes; writes docs/EVALUATION.md")
+    sp.add_argument("--seeds", help="comma-separated seeds (default 42,1337)")
+    sp.add_argument("--scenarios", help="comma-separated scenarios (default all)")
+    sp.add_argument("--modes", help="detection_only,single_agent,multi_agent")
+    sp.set_defaults(fn=cmd_eval)
+    sp = sub.add_parser("demo", help="scripted demo: faulty proposal rejected, then a verified recovery")
+    sp.add_argument("--scenario", default="duplicate_payments")
+    sp.add_argument("--skip-bad", action="store_true")
+    sp.add_argument("--no-approve", action="store_true", help="stop at the approval (approve in the dashboard)")
+    sp.set_defaults(fn=cmd_demo)
+    sp = sub.add_parser("mcp", help="run the read-only MCP server (stdio)")
+    sp.set_defaults(fn=cmd_mcp)
     sp = sub.add_parser("oracle", help="summarize independent source truth")
     sp.set_defaults(fn=cmd_oracle)
     args = p.parse_args(argv)

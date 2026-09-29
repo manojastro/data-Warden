@@ -288,3 +288,35 @@ def _week(d: date) -> date:
     from datetime import timedelta
 
     return d - timedelta(days=d.weekday())
+
+
+def shadow_vs_canonical(shadow_schema: str, partition_scope: list[str]) -> dict:
+    """Per-date net revenue of the shadow build vs canonical, for the repair review screen."""
+    scope = set(partition_scope)
+    with connect("validator") as conn:
+        canonical = _mart(conn, "marts")
+        shadow = _mart(conn, shadow_schema)
+    rows = []
+    for d in sorted(set(canonical) | set(shadow)):
+        c, s_ = canonical.get(d), shadow.get(d)
+        cn = c["net_revenue_paise"] if c else None
+        sn = s_["net_revenue_paise"] if s_ else None
+        if cn != sn or str(d) in scope:
+            rows.append(
+                {
+                    "business_date": str(d),
+                    "in_scope": str(d) in scope,
+                    "canonical_net_paise": cn,
+                    "shadow_net_paise": sn,
+                    "delta_paise": (sn or 0) - (cn or 0),
+                    "canonical_captured": c["captured_payment_count"] if c else None,
+                    "shadow_captured": s_["captured_payment_count"] if s_ else None,
+                }
+            )
+    return {
+        "shadow_schema": shadow_schema,
+        "shadow_available": True,
+        "partitions_compared": len(set(canonical) | set(shadow)),
+        "differences": rows,
+        "captured_at": "validation",
+    }

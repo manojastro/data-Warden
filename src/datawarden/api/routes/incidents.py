@@ -332,3 +332,97 @@ async def stream(
                 break
 
     return EventSourceResponse(gen(), ping=15)
+
+
+@router.get("/graph/definition")
+def graph_definition(variant: str = Query("multi", pattern="^(multi|single)$"), _: Principal = Depends(reader)) -> dict:
+    """The incident *execution* graph (not data lineage)."""
+    from datawarden.agents.graph import EDGES, GRAPH_VERSION, NODES
+
+    if variant == "single":
+        nodes = [n for n in NODES if n not in ("quality_investigator", "lineage_investigator", "root_cause")]
+        nodes.insert(2, "single_investigation")
+        edges = [e for e in EDGES if not set(e) & {"quality_investigator", "lineage_investigator", "root_cause"}]
+        edges += [
+            ("load_context", "single_investigation"),
+            ("single_investigation", "repair_planner"),
+            ("single_investigation", "close_no_action"),
+            ("single_investigation", "escalate"),
+        ]
+    else:
+        nodes, edges = NODES, EDGES
+    return {
+        "version": GRAPH_VERSION,
+        "variant": variant,
+        "nodes": nodes,
+        "edges": [{"source": a, "target": b} for a, b in edges],
+    }
+
+
+@router.get("/incidents/{incident_id}/graph-status")
+def graph_status(incident_id: str, db: Session = Depends(get_db), _: Principal = Depends(reader)) -> dict:
+    inc = _incident(db, incident_id)
+    status: dict[str, dict] = {}
+    for ev in db.scalars(
+        select(StreamEvent)
+        .where(
+            StreamEvent.incident_id == incident_id,
+            StreamEvent.event_type.in_(["node.started", "node.completed", "node.failed"]),
+        )
+        .order_by(StreamEvent.id)
+    ):
+        node_name = ev.payload.get("node")
+        cur = status.setdefault(node_name, {"runs": 0})
+        if ev.event_type == "node.started":
+            cur.update(state="running", runs=cur["runs"] + 1, started_at=ev.created_at.isoformat())
+        elif ev.event_type == "node.completed":
+            cur.update(state="completed", seconds=ev.payload.get("seconds"), route=ev.payload.get("route"))
+        else:
+            cur.update(state="failed", error=ev.payload.get("error"))
+    if inc.status == "awaiting_approval" and "request_approval" in status:
+        status["request_approval"]["state"] = "waiting"
+    variant = inc.graph_version.split("+", 1)[1] if inc.graph_version and "+" in inc.graph_version else "multi"
+    return {"incident_status": inc.status, "variant": variant, "nodes": status}
+
+
+@router.get("/proposals/{proposal_id}/comparison")
+def proposal_comparison(proposal_id: str, db: Session = Depends(get_db), _: Principal = Depends(reader)) -> dict:
+    """Shadow vs canonical mart partitions for a proposal. Live while the shadow schema exists;
+    otherwise the comparison captured at validation time."""
+    from datawarden.recovery.validation import shadow_vs_canonical
+    from datawarden.warehouse.conn import connect
+
+    prop = db.get(RepairProposal, proposal_id)
+    if prop is None:
+        raise HTTPException(404, "proposal not found")
+    if prop.shadow_schema:
+        try:
+            with connect("validator") as conn:
+                live = conn.execute(
+                    "SELECT to_regclass(%s) IS NOT NULL AS ok", (f"{prop.shadow_schema}.mart_daily_revenue",)
+                ).fetchone()["ok"]
+            if live:
+                return {
+                    "proposal_id": proposal_id,
+                    **shadow_vs_canonical(prop.shadow_schema, prop.partition_scope),
+                    "captured_at": "live",
+                }
+        except Exception:  # noqa: BLE001 - fall back to the comparison captured at validation time
+            stored = prop.comparison or {}
+            return {
+                "proposal_id": proposal_id,
+                "shadow_schema": prop.shadow_schema,
+                "shadow_available": False,
+                "partitions_compared": stored.get("partitions_compared", 0),
+                "differences": stored.get("differences", []),
+                "captured_at": "validation",
+            }
+    stored = prop.comparison or {}
+    return {
+        "proposal_id": proposal_id,
+        "shadow_schema": prop.shadow_schema,
+        "shadow_available": bool(stored.get("differences") is not None and not stored.get("error")),
+        "partitions_compared": stored.get("partitions_compared", 0),
+        "differences": stored.get("differences", []),
+        "captured_at": "validation" if stored else None,
+    }

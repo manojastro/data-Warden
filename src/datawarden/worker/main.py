@@ -15,6 +15,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from datetime import UTC
 
 from sqlalchemy import text
 
@@ -87,7 +88,44 @@ def run_one(worker_id: str, kinds: list[str] | None = None) -> dict | None:
                 job["max_attempts"],
             )
         job["status"], job["error"] = "failed", str(exc)
+        if job["attempts"] >= job["max_attempts"] and job.get("incident_id"):
+            _escalate_after_failure(job["incident_id"], job["kind"], exc)
     return job
+
+
+def _escalate_after_failure(incident_id: str, kind: str, exc: Exception) -> None:
+    """A job that exhausted its retries must leave a visible, terminal incident state."""
+    from datetime import datetime
+
+    from datawarden.db.models import Incident
+    from datawarden.services.audit import audit, publish
+
+    with new_session() as db:
+        inc = db.get(Incident, incident_id)
+        if inc is None or inc.status in (
+            "resolved",
+            "closed_no_action",
+            "escalated",
+            "cancelled",
+            "manual_intervention",
+        ):
+            return
+        # a failure while recovering may have left canonical data mid-change: demand a human
+        inc.status = "manual_intervention" if inc.status == "recovering" else "escalated"
+        inc.terminal_reason = f"{kind} failed after retries: {type(exc).__name__}: {str(exc)[:300]}"
+        inc.closed_at = datetime.now(UTC)
+        inc.version += 1
+        audit(
+            db,
+            "system:worker",
+            f"incident.{inc.status}",
+            "incident",
+            incident_id,
+            incident_id=incident_id,
+            detail={"job_kind": kind, "error": str(exc)[:500]},
+        )
+        publish(db, incident_id, "incident.status", {"status": inc.status, "reason": inc.terminal_reason})
+        db.commit()
 
 
 def drain(

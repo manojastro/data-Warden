@@ -6,6 +6,7 @@ logs, prompts, or artifacts.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
@@ -13,7 +14,7 @@ from urllib.parse import quote
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(os.environ.get("DW_REPO_ROOT") or Path(__file__).resolve().parents[2])
 
 
 class Settings(BaseSettings):
@@ -68,6 +69,9 @@ class Settings(BaseSettings):
     model_token_budget: int = 200_000
     model_price_input_per_1k: float | None = None
     model_price_output_per_1k: float | None = None
+
+    # Investigation graph: "multi" (product) or "single" (single-agent evaluation baseline)
+    graph_variant: str = "multi"
 
     # Budgets
     budget_investigation_rounds: int = 3
