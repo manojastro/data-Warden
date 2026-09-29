@@ -13,6 +13,7 @@ vars:
   lookback_days: 2
   replay_start: null
   replay_end: null
+  replay_dates: []
   code_version: "unknown"
 
 models:

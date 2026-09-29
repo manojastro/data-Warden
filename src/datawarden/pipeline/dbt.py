@@ -120,6 +120,11 @@ def _validate_vars(vars_: dict) -> dict:
     for key, value in vars_.items():
         if key in ("replay_start", "replay_end"):
             allowed[key] = date.fromisoformat(str(value)).isoformat()
+        elif key == "replay_dates":
+            dates = sorted({date.fromisoformat(str(d)).isoformat() for d in value})
+            if not 1 <= len(dates) <= 62:
+                raise DbtCommandError("replay_dates must list 1-62 dates")
+            allowed[key] = dates
         elif key == "code_version":
             if not _HEX_RE.match(str(value)):
                 raise DbtCommandError("code_version must be a hex hash")

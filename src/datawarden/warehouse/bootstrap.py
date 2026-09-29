@@ -248,7 +248,7 @@ def bootstrap_warehouse(settings: Settings | None = None, *, recreate: bool = Fa
         # --- privileges ---------------------------------------------------------------------
         cur.execute("""
             GRANT USAGE ON SCHEMA raw, ops TO dw_pipeline, dw_transformer, dw_validator, dw_executor;
-            GRANT USAGE ON SCHEMA raw TO dw_shadow;
+            GRANT USAGE ON SCHEMA raw, ops TO dw_shadow;
             GRANT INSERT, SELECT ON ALL TABLES IN SCHEMA raw TO dw_pipeline;
             GRANT USAGE ON ALL SEQUENCES IN SCHEMA raw TO dw_pipeline;
             GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA ops TO dw_pipeline;
@@ -256,6 +256,7 @@ def bootstrap_warehouse(settings: Settings | None = None, *, recreate: bool = Fa
             REVOKE UPDATE ON ops.ingested_batches FROM dw_pipeline;
             GRANT SELECT ON ALL TABLES IN SCHEMA raw TO dw_transformer, dw_shadow, dw_validator;
             GRANT SELECT ON ALL TABLES IN SCHEMA ops TO dw_validator, dw_executor;
+            GRANT SELECT ON ops.ingested_batches TO dw_shadow;
             GRANT INSERT ON ops.pipeline_runs, ops.task_runs, ops.run_logs TO dw_executor;
             GRANT UPDATE ON ops.pipeline_runs, ops.task_runs TO dw_executor;
             GRANT USAGE ON ALL SEQUENCES IN SCHEMA ops TO dw_executor;

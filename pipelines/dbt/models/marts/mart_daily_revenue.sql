@@ -11,11 +11,16 @@
 -- net revenue     = gross collected - refunds
 -- Payments and refunds are aggregated independently before joining, so neither multiplies
 -- the other. Scheduled runs recompute the latest `lookback_days` partitions; older
--- partitions change only through an explicit replay window (replay_start/replay_end).
+-- partitions change only through an explicit replay (replay_dates, or replay_start/replay_end).
+
+{% set replay_dates = var('replay_dates') %}
 
 with bounds as (
     {% if is_incremental() %}
-        {% if var('replay_start') and var('replay_end') %}
+        {% if replay_dates %}
+    select min(d) as start_date, max(d) as end_date
+    from unnest(array[{% for d in replay_dates %}'{{ d }}'::date{% if not loop.last %}, {% endif %}{% endfor %}]) as d
+        {% elif var('replay_start') and var('replay_end') %}
     select '{{ var("replay_start") }}'::date as start_date, '{{ var("replay_end") }}'::date as end_date
         {% else %}
     select (max(d) - {{ var('lookback_days') }})::date as start_date, max(d) as end_date
@@ -30,6 +35,16 @@ with bounds as (
     {% endif %}
 ),
 
+in_scope as (
+    -- replay_dates limits recomputation to exactly the listed partitions
+    select null::date as d where false
+    {% if is_incremental() and replay_dates %}
+        {% for d in replay_dates %}
+    union all select '{{ d }}'::date
+        {% endfor %}
+    {% endif %}
+),
+
 payments as (
     select
         payment_business_date as business_date,
@@ -39,6 +54,7 @@ payments as (
     cross join bounds
     where status = 'captured'
       and payment_business_date between bounds.start_date and bounds.end_date
+      {% if is_incremental() and replay_dates %}and payment_business_date in (select d from in_scope){% endif %}
     group by payment_business_date
 ),
 
@@ -51,6 +67,7 @@ refunds as (
     cross join bounds
     where status = 'succeeded'
       and refund_business_date between bounds.start_date and bounds.end_date
+      {% if is_incremental() and replay_dates %}and refund_business_date in (select d from in_scope){% endif %}
     group by refund_business_date
 ),
 

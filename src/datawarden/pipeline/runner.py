@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
@@ -120,6 +121,7 @@ def run_pipeline(
     trigger: str = "manual",
     full_refresh: bool = False,
     replay_window: tuple[date, date] | None = None,
+    replay_dates: list[date] | None = None,
     dbt_target: str = "pipeline",
     run_id: str | None = None,
     run_checks_after: bool = True,
@@ -132,11 +134,21 @@ def run_pipeline(
     watermark = sources.source_watermark()
     report = RunReport(run_id, "running", trigger, commit, watermark)
     conn = connect("pipeline", autocommit=True)
+    # One canonical build at a time (scheduled runs, replays, approved repairs, rollbacks).
+    deadline = time.monotonic() + 900
+    while not conn.execute("SELECT pg_try_advisory_lock(hashtext('datawarden_canonical_build')) AS ok").fetchone()[
+        "ok"
+    ]:
+        if time.monotonic() > deadline:
+            conn.close()
+            raise RuntimeError("timed out waiting for the canonical build lock")
+        time.sleep(1)
     rec = _Recorder(conn, run_id)
     params = {
         "full_refresh": full_refresh,
         "dbt_target": dbt_target,
         "replay_window": [d.isoformat() for d in replay_window] if replay_window else None,
+        "replay_dates": sorted({d.isoformat() for d in replay_dates}) if replay_dates else None,
     }
     conn.execute(
         """INSERT INTO ops.pipeline_runs (run_id, trigger, status, source_watermark, code_commit, params)
@@ -194,7 +206,10 @@ def run_pipeline(
             report.tasks["dbt_run_mart"] = "failed"
             raise TransientTaskError(chaos)
         mart_vars = dict(vars_)
-        if replay_window:
+        if replay_dates:
+            mart_vars["replay_dates"] = sorted({d.isoformat() for d in replay_dates})
+            rec.log("dbt_run_mart", "info", f"bounded replay of mart partitions {mart_vars['replay_dates']}")
+        elif replay_window:
             mart_vars.update(replay_start=replay_window[0].isoformat(), replay_end=replay_window[1].isoformat())
             rec.log("dbt_run_mart", "info", f"bounded replay of mart partitions {replay_window[0]}..{replay_window[1]}")
         res = dbt.run_dbt(

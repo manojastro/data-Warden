@@ -93,6 +93,32 @@ def cmd_fault(args) -> int:
     return 2
 
 
+def cmd_app_seed(args) -> int:
+    from datawarden.db.session import session_scope
+    from datawarden.services.auth import ensure_demo_users
+    from datawarden.services.catalog import sync_catalog
+
+    with session_scope() as db:
+        cat = sync_catalog(db)
+        users = ensure_demo_users(db)
+    print(
+        f"catalog: {cat}; demo users created: {users['created'] or 'none (already exist)'}; "
+        f"credentials file: {users['credentials_file']}"
+    )
+    return 0
+
+
+def cmd_worker(args) -> int:
+    from datawarden.worker.main import drain, main
+
+    if args.drain:
+        for job in drain(wait_for_delayed=args.wait):
+            print(f"{job['id']} {job['kind']} {job['status']}")
+        return 0
+    main()
+    return 0
+
+
 def cmd_oracle(args) -> int:
     from datawarden.oracle.reconciliation import source_truth
 
@@ -128,6 +154,12 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("scenario", nargs="?")
     sp.add_argument("--no-rebuild", action="store_true")
     sp.set_defaults(fn=cmd_fault)
+    sp = sub.add_parser("app-seed", help="sync catalog/lineage/checks and create local demo users")
+    sp.set_defaults(fn=cmd_app_seed)
+    sp = sub.add_parser("worker", help="run the job worker")
+    sp.add_argument("--drain", action="store_true", help="process ready jobs then exit")
+    sp.add_argument("--wait", type=float, default=0, help="with --drain: keep polling this many seconds")
+    sp.set_defaults(fn=cmd_worker)
     sp = sub.add_parser("oracle", help="summarize independent source truth")
     sp.set_defaults(fn=cmd_oracle)
     args = p.parse_args(argv)

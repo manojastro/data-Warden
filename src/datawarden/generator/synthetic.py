@@ -243,6 +243,15 @@ class SyntheticWorld:
                 self._payment(oid, total, created, 1, "failed")
             return
         r = rng.random()
+        if r < 0.012:
+            # Split tender: two legitimate captured payments of equal amount for one order. They share
+            # order_id, amount and status but are distinct payments (distinct payment_id/event_id).
+            half = total // 2
+            ts = created
+            for attempt in (1, 2):
+                ts = ts + timedelta(minutes=rng.randint(1, 5))
+                self._payment(oid, half, ts, attempt, "captured")
+            return
         if r < 0.85:
             outcomes = ["captured"]
         elif r < 0.95:
