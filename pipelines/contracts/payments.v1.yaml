@@ -1,0 +1,14 @@
+entity: payments
+version: v1
+owner: payments-gateway
+fields:
+  event_id: {type: string, required: true}
+  payment_id: {type: string, required: true}
+  order_id: {type: string, required: true}
+  attempt_no: {type: integer, required: true}
+  status: {type: string, required: true, enum: [captured, failed, pending]}
+  amount_paise: {type: integer, required: true, unit: paise}
+  currency: {type: string, required: true, enum: [INR]}
+  method: {type: string, required: false}
+  event_ts: {type: timestamp, required: true}
+  schema_version: {type: string, required: true}

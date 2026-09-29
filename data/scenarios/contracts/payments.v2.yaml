@@ -1,0 +1,22 @@
+# Published by the payments-gateway team together with the v2 feed (schema drift scenario,
+# "registered contract" variant). Declares that the renamed field keeps its meaning.
+entity: payments
+version: v2
+owner: payments-gateway
+supersedes: v1
+changes:
+  - kind: rename
+    from: amount_paise
+    to: total_amount_paise
+    semantics_unchanged: true
+fields:
+  event_id: {type: string, required: true}
+  payment_id: {type: string, required: true}
+  order_id: {type: string, required: true}
+  attempt_no: {type: integer, required: true}
+  status: {type: string, required: true, enum: [captured, failed, pending]}
+  total_amount_paise: {type: integer, required: true, unit: paise, canonical: amount_paise}
+  currency: {type: string, required: true, enum: [INR]}
+  method: {type: string, required: false}
+  event_ts: {type: timestamp, required: true}
+  schema_version: {type: string, required: true}

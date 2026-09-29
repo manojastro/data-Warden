@@ -1,0 +1,25 @@
+name: datawarden
+version: "1.0.0"
+config-version: 2
+profile: datawarden
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target"]
+
+vars:
+  business_tz: "Asia/Kolkata"
+  lookback_days: 2
+  replay_start: null
+  replay_end: null
+  code_version: "unknown"
+
+models:
+  datawarden:
+    staging:
+      +schema: staging
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table

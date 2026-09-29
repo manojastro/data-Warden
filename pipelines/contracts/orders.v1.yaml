@@ -1,0 +1,13 @@
+entity: orders
+version: v1
+owner: commerce-core
+fields:
+  event_id: {type: string, required: true}
+  event_type: {type: string, required: true, enum: [order_created, order_cancelled]}
+  order_id: {type: string, required: true}
+  customer_id: {type: string, required: true}
+  order_total_paise: {type: integer, required: true, unit: paise}
+  currency: {type: string, required: true, enum: [INR]}
+  customer_note: {type: string, required: false, free_text: true}
+  event_ts: {type: timestamp, required: true}
+  schema_version: {type: string, required: true}

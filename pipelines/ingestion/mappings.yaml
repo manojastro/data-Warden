@@ -1,0 +1,13 @@
+# Ingestion mappings: which delivered source schema versions are accepted, and how their
+# fields map onto the canonical raw columns ({source_field: canonical_column}).
+# A schema version is only ingestible when (1) it is listed here and (2) a versioned contract
+# for it exists in the contract registry. Repairs may add a mapping only when the registered
+# contract declares the field's meaning.
+customers:
+  v1: {}
+orders:
+  v1: {}
+payments:
+  v1: {}
+refunds:
+  v1: {}

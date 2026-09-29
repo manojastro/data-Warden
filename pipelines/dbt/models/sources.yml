@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: raw
+    # Canonical runs read `raw`. Shadow runs point this at an incident-scoped source schema
+    # (views over raw plus shadow-ingested pending batches).
+    schema: "{{ var('raw_schema', 'raw') }}"
+    description: Append-only source events. One row per delivered source record.
+    tables:
+      - name: raw_order_events
+      - name: raw_payment_events
+      - name: raw_refund_events
+      - name: raw_customer_events

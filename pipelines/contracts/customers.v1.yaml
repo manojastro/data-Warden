@@ -1,0 +1,13 @@
+entity: customers
+version: v1
+owner: crm-platform
+fields:
+  event_id: {type: string, required: true}
+  event_type: {type: string, required: true, enum: [customer_created, customer_updated]}
+  customer_id: {type: string, required: true}
+  full_name: {type: string, required: false, pii: true}
+  email: {type: string, required: false, pii: true}
+  phone: {type: string, required: false, pii: true}
+  city: {type: string, required: false}
+  event_ts: {type: timestamp, required: true}
+  schema_version: {type: string, required: true}
