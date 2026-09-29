@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import uuid
 from datetime import date
 
 import pytest
@@ -274,9 +275,10 @@ def test_conflicting_repairs_cannot_touch_the_same_partition(clean):
         # another in-flight operation already holds one of the partitions
         from datawarden.db.models import PartitionLock
 
+        other_id = f"rop_conflict_{uuid.uuid4().hex[:8]}"
         other = RecoveryOperation(
-            id="rop_conflict_test",
-            operation_key="conflict-test",
+            id=other_id,
+            operation_key=other_id,
             incident_id=iid,
             proposal_id=prop.id,
             approval_id=appr.id,
@@ -293,12 +295,10 @@ def test_conflicting_repairs_cannot_touch_the_same_partition(clean):
     with new_session() as db:
         inc = db.get(Incident, iid)
         op = db.scalar(
-            select(RecoveryOperation).where(
-                RecoveryOperation.approval_id == appr.id, RecoveryOperation.id != "rop_conflict_test"
-            )
+            select(RecoveryOperation).where(RecoveryOperation.approval_id == appr.id, RecoveryOperation.id != other_id)
         )
         assert op.status == "conflict" and inc.status == "escalated"
-        db.query(RecoveryOperation).filter_by(id="rop_conflict_test").update({"status": "cancelled"})
+        db.query(RecoveryOperation).filter_by(id=other_id).update({"status": "cancelled"})
         db.commit()
     assert _mart() == before  # nothing was written
 

@@ -232,7 +232,7 @@ function RepairTab({ d, onChanged }: { d: IncidentDetail; onChanged: () => void 
   );
 }
 
-type Comparison = { shadow_available: boolean; partitions_compared: number; differences: { business_date: string; in_scope: boolean;
+type Comparison = { shadow_available: boolean; partitions_compared: number; captured_at?: string | null; differences: { business_date: string; in_scope: boolean;
   canonical_net_paise: number | null; shadow_net_paise: number | null; delta_paise: number }[] };
 
 function ProposalCard({ p, onChanged }: { p: Proposal; onChanged: () => void }) {
@@ -292,7 +292,8 @@ function ProposalCard({ p, onChanged }: { p: Proposal; onChanged: () => void }) 
             ) : <Empty>Not validated (policy rejected before shadow execution).</Empty>}
           </div>
           <div>
-            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Shadow vs canonical (net revenue)</h3>
+            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Shadow vs canonical (net revenue)
+              {cmp.data?.captured_at === "validation" && <span className="ml-1 font-normal normal-case">· as captured at validation time</span>}</h3>
             {!p.shadow_schema ? <Empty>No shadow run.</Empty> : cmp.loading ? <Loading /> : cmp.data?.shadow_available ? (
               <Table head={["Date", "Canonical", "Shadow", "Δ", "Scope"]}>
                 {cmp.data.differences.map((r) => (

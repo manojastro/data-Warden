@@ -13,6 +13,10 @@ executor applies it, verifies the result, and rolls back if anything is off.
 
 Status of every feature, with evidence: [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md).
 
+| Incident workspace (live execution graph) | Repair review (diff, protected validation, journal) |
+| --- | --- |
+| ![Execution graph](docs/images/graph.png) | ![Repair review](docs/images/repair.png) |
+
 ## What is in the box
 
 | Area | Implementation |

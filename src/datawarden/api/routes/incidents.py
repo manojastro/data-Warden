@@ -395,7 +395,7 @@ def proposal_comparison(proposal_id: str, db: Session = Depends(get_db), _: Prin
     prop = db.get(RepairProposal, proposal_id)
     if prop is None:
         raise HTTPException(404, "proposal not found")
-    if prop.shadow_schema:
+    if prop.shadow_schema and prop.status not in ("applied", "rolled_back", "failed"):
         try:
             with connect("validator") as conn:
                 live = conn.execute(

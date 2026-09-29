@@ -87,7 +87,7 @@ def create_app() -> FastAPI:
 
     dist = REPO_ROOT / "apps" / "web" / "dist"
     if dist.exists():
-        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+        app.mount("/static", StaticFiles(directory=dist / "static"), name="static")
 
         @app.get("/{path:path}", include_in_schema=False)
         def spa(path: str):

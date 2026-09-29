@@ -10,5 +10,5 @@ export default defineConfig({
     port: 5173,
     proxy: { "/api": { target: api, changeOrigin: false } },
   },
-  build: { outDir: "dist", sourcemap: false },
+  build: { outDir: "dist", assetsDir: "static", sourcemap: false },
 });
